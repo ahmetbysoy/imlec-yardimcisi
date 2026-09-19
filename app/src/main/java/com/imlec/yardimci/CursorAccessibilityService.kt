@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Point
 import android.graphics.Rect
@@ -491,23 +492,72 @@ class CursorAccessibilityService : AccessibilityService() {
         return n
     }
 
-    private fun move(dir: Int) {
-        val node = target?.also { it.refresh() } ?: focusedEditable() ?: return
-        val text: CharSequence = if (node.isShowingHintText) "" else (node.text ?: "")
-        var start = node.textSelectionStart
-        var end = node.textSelectionEnd
-        if (start < 0 || end < 0) {
-            start = text.length
-            end = text.length
-        }
-        val target = if (start != end) {
-            if (dir < 0) min(start, end) else max(start, end)
-        } else {
-            step(text, end, dir)
-        }
+    private fun setSel(node: AccessibilityNodeInfo, start: Int, end: Int): Boolean {
         val args = Bundle()
-        args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, target)
-        args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, target)
-        node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+        args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, start)
+        args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end)
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+    }
+
+    private fun extendByGranularity(node: AccessibilityNodeInfo, dir: Int): Boolean {
+        val args = Bundle()
+        args.putInt(
+            AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
+            AccessibilityNodeInfo.MOVEMENT_GRANULARITY_CHARACTER
+        )
+        args.putBoolean(AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN, true)
+        val action = if (dir > 0)
+            AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY
+        else
+            AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY
+        return node.performAction(action, args)
+    }
+
+    /** Web'de API yoksa sağ tutamacı birkaç piksel sürükle. */
+    private fun dragHandle(dir: Int) {
+        val box = Rect()
+        target?.getBoundsInScreen(box)
+        if (box.isEmpty) box.set(lastAnchor)
+        if (box.isEmpty) return
+        val x = if (dir > 0) box.right.toFloat() - 4f else box.left.toFloat() + 4f
+        val y = box.bottom.toFloat() - 8f
+        val path = Path()
+        path.moveTo(x, y)
+        path.lineTo(x + dir * dp(36), y)
+        val stroke = GestureDescription.StrokeDescription(path, 0, 90)
+        dispatchGesture(
+            GestureDescription.Builder().addStroke(stroke).build(),
+            null,
+            null
+        )
+    }
+
+    private fun move(dir: Int) {
+        val node = target?.also { it.refresh() }
+            ?: focusedEditable()
+            ?: lastPick?.also { it.refresh() }
+
+        if (node != null) {
+            val text: CharSequence = if (node.isShowingHintText) "" else (node.text ?: "")
+            var start = node.textSelectionStart
+            var end = node.textSelectionEnd
+            if (start > end) {
+                val t = start; start = end; end = t
+            }
+            if (start >= 0 && end >= 0 && text.isNotEmpty()) {
+                if (start != end) {
+                    end = step(text, end, dir).coerceIn(0, text.length)
+                    if (end < start) {
+                        val t = start; start = end; end = t
+                    }
+                    if (setSel(node, start, end)) return
+                } else {
+                    val p = step(text, end, dir).coerceIn(0, text.length)
+                    if (setSel(node, p, p)) return
+                }
+            }
+            if (extendByGranularity(node, dir)) return
+        }
+        dragHandle(dir)
     }
 }
