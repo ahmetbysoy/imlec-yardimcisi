@@ -15,9 +15,9 @@ import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
-import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -32,14 +32,16 @@ import android.widget.LinearLayout
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import kotlin.math.max
-import kotlin.math.min
 
 /**
- * Metin kutusuna odaklanilinca imlecin yakininda mini sol/sag oklar cizer.
- * Oklar odaktaki kutunun secimini ACTION_SET_SELECTION ile bir karakter kaydirir.
- * Yazilan metin okunmaz/kaydedilmez; yalnizca imlec konumu ve uzunluk icin kullanilir.
+ * İki net mod:
+ *  INPUT  — odak editable yazı kutusu (WhatsApp, form). Oklar imleci kaydırır.
+ *  SELECT — sistem seçim şeridi veya uzun basış, kutu değil. Oklar seçimi uzatır.
+ * WebView ağacı taranmaz (çökme nedeni). typeAllMask yok.
  */
 class CursorAccessibilityService : AccessibilityService() {
+
+    private enum class Mode { HIDE, INPUT, SELECT }
 
     companion object {
         @Volatile
@@ -58,11 +60,15 @@ class CursorAccessibilityService : AccessibilityService() {
     private var target: AccessibilityNodeInfo? = null
     private val lastAnchor = Rect()
     private var anchorAt = 0L
+    private var mode = Mode.HIDE
 
-    private val updateRunnable = Runnable { update() }
+    private val updateRunnable = Runnable {
+        try {
+            update()
+        } catch (_: Throwable) {
+        }
+    }
     private val hideRunnable = Runnable { hideOverlay() }
-
-    // ---------- yasam dongusu ----------
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -71,34 +77,31 @@ class CursorAccessibilityService : AccessibilityService() {
         val channel = NotificationChannel(CHANNEL_ID, "Durum", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         showNotification()
-        schedule()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        when (event.eventType) {
-            AccessibilityEvent.TYPE_VIEW_FOCUSED,
-            AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_CLICKED,
-            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
-                val src = event.source
-                if (src != null &&
-                    (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED ||
-                        event.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED)
-                ) {
-                    lastPick?.recycle()
-                    lastPick = AccessibilityNodeInfo.obtain(src)
-                    src.getBoundsInScreen(lastAnchor)
-                    anchorAt = SystemClock.uptimeMillis()
-                    src.recycle()
-                } else {
-                    src?.recycle()
-                }
-                schedule()
+        try {
+            val t = event.eventType
+            if (t != AccessibilityEvent.TYPE_VIEW_FOCUSED &&
+                t != AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED &&
+                t != AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED &&
+                t != AccessibilityEvent.TYPE_VIEW_LONG_CLICKED &&
+                t != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                t != AccessibilityEvent.TYPE_WINDOWS_CHANGED
+            ) {
+                return
             }
+            val src = event.source
+            if (src != null &&
+                (t == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED ||
+                    t == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED)
+            ) {
+                remember(src, t == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED)
+            }
+            src?.recycle()
+            schedule()
+        } catch (_: Throwable) {
         }
     }
 
@@ -124,11 +127,10 @@ class CursorAccessibilityService : AccessibilityService() {
         target = null
         try {
             NotificationManagerCompat.from(this).cancel(NOTIF_ID)
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
         }
     }
 
-    /** Ana ekrandan veya bildirimden ayar degisince cagrilir. */
     fun onSettingsChanged() {
         showNotification()
         schedule()
@@ -136,10 +138,20 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private fun schedule() {
         handler.removeCallbacks(updateRunnable)
-        handler.postDelayed(updateRunnable, 60)
+        handler.postDelayed(updateRunnable, 80)
     }
 
-    // ---------- bildirim ----------
+    private fun remember(src: AccessibilityNodeInfo, longPress: Boolean) {
+        try {
+            lastPick?.recycle()
+            lastPick = AccessibilityNodeInfo.obtain(src)
+            src.getBoundsInScreen(lastAnchor)
+            if (longPress || hasRange(src)) {
+                anchorAt = SystemClock.uptimeMillis()
+            }
+        } catch (_: Throwable) {
+        }
+    }
 
     private fun showNotification() {
         val on = Prefs.enabled(this)
@@ -154,7 +166,7 @@ class CursorAccessibilityService : AccessibilityService() {
         val n = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle("İmleç yardımcısı")
-            .setContentText(if (on) "Aktif: metin kutusunda oklar görünür" else "Duraklatıldı")
+            .setContentText(if (on) "Aktif" else "Duraklatıldı")
             .setContentIntent(open)
             .addAction(0, if (on) "Duraklat" else "Devam et", toggle)
             .setOngoing(true)
@@ -162,11 +174,9 @@ class CursorAccessibilityService : AccessibilityService() {
             .build()
         try {
             NotificationManagerCompat.from(this).notify(NOTIF_ID, n)
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
         }
     }
-
-    // ---------- yardimcilar ----------
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -182,10 +192,11 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun focusedEditable(): AccessibilityNodeInfo? {
-        val root = rootInActiveWindow ?: return null
-        val node = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return null
-        return if (node.isEditable) node else null
+    private fun isInputField(n: AccessibilityNodeInfo): Boolean {
+        if (!n.isEditable) return false
+        val cls = n.className?.toString() ?: ""
+        if (cls.contains("WebView", true)) return false
+        return true
     }
 
     private fun hasRange(n: AccessibilityNodeInfo): Boolean {
@@ -194,31 +205,29 @@ class CursorAccessibilityService : AccessibilityService() {
         return s >= 0 && e >= 0 && s != e
     }
 
-    private fun findSelection(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        if (hasRange(n) || (n.isEditable && n.isFocused)) {
-            return AccessibilityNodeInfo.obtain(n)
-        }
-        for (i in 0 until n.childCount) {
-            val c = n.getChild(i) ?: continue
-            val f = findSelection(c)
-            c.recycle()
-            if (f != null) return f
-        }
-        return null
-    }
-
-    private fun pickNode(): AccessibilityNodeInfo? {
-        focusedEditable()?.let { return it }
-        lastPick?.let { p ->
-            if (p.refresh()) return AccessibilityNodeInfo.obtain(p)
-        }
+    private fun focusedInput(): AccessibilityNodeInfo? {
         val root = rootInActiveWindow ?: return null
-        val found = findSelection(root)
-        root.recycle()
-        return found
+        val node = try {
+            root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        } finally {
+            root.recycle()
+        } ?: return null
+        return if (isInputField(node)) node else {
+            node.recycle()
+            null
+        }
     }
 
-    /** Sistem seçim şeridi (Kopyala / Tümünü seç) küçük bir pencere olarak durur. */
+    private fun imeVisible(): Boolean {
+        val ws = try {
+            windows
+        } catch (_: Exception) {
+            return false
+        }
+        return ws.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+    }
+
+    /** Sistem Kopyala şeridi: kısa, geniş, tam ekran değil. */
     private fun actionModeRect(): Rect? {
         val ws = try {
             windows
@@ -226,52 +235,89 @@ class CursorAccessibilityService : AccessibilityService() {
             return null
         }
         val scr = screen()
-        val minH = dp(32)
-        val maxH = dp(100)
-        val minW = dp(96)
+        val minH = dp(36)
+        val maxH = dp(88)
+        val minW = dp(140)
         var best: Rect? = null
         for (w in ws) {
             if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
             if (w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
             val b = Rect()
             w.getBoundsInScreen(b)
-            if (b.height() in minH..maxH && b.width() in minW until scr.x - dp(4) &&
-                b.top > dp(36) && b.bottom < scr.y - dp(24)
+            if (b.height() in minH..maxH &&
+                b.width() in minW..(scr.x - dp(16)) &&
+                b.top in dp(40)..(scr.y - dp(80))
             ) {
-                best = b
+                best = Rect(b)
             }
         }
         return best
     }
 
-    // ---------- gosterme / konumlandirma ----------
+    private fun classify(): Mode {
+        val menu = actionModeRect()
+        val input = focusedInput()
+        val recentSelect = SystemClock.uptimeMillis() - anchorAt < 6000 && !lastAnchor.isEmpty
+        val pickEditable = try {
+            lastPick?.refresh() == true && lastPick?.let { isInputField(it) } == true
+        } catch (_: Throwable) {
+            false
+        }
+
+        val result = when {
+            menu != null && input == null -> Mode.SELECT
+            menu != null && input != null && hasRange(input) -> Mode.SELECT
+            input != null && (imeVisible() || input.isFocused) -> Mode.INPUT
+            recentSelect && !pickEditable -> Mode.SELECT
+            else -> Mode.HIDE
+        }
+        input?.recycle()
+        return result
+    }
 
     private fun update() {
         if (!Prefs.enabled(this)) {
             hideOverlay()
             return
         }
-        val menu = actionModeRect()
-        val node = pickNode()
-        val recent = SystemClock.uptimeMillis() - anchorAt < 8000 && !lastAnchor.isEmpty
-        if (node == null && menu == null && !recent) {
-            if (attached) {
-                handler.removeCallbacks(hideRunnable)
-                handler.postDelayed(hideRunnable, 250)
+        mode = classify()
+        when (mode) {
+            Mode.HIDE -> {
+                if (attached) {
+                    handler.removeCallbacks(hideRunnable)
+                    handler.postDelayed(hideRunnable, 200)
+                }
             }
-            return
+            Mode.INPUT -> {
+                handler.removeCallbacks(hideRunnable)
+                val n = focusedInput()
+                if (n != null) {
+                    swapTarget(n)
+                    positionOverlay(n)
+                    n.recycle()
+                } else {
+                    hideOverlay()
+                }
+            }
+            Mode.SELECT -> {
+                handler.removeCallbacks(hideRunnable)
+                lastPick?.let { p ->
+                    try {
+                        if (p.refresh()) swapTarget(AccessibilityNodeInfo.obtain(p))
+                    } catch (_: Throwable) {
+                    }
+                }
+                val menu = actionModeRect()
+                if (menu != null) placeAboveMenu(menu)
+                else if (!lastAnchor.isEmpty) placeAt(lastAnchor.centerX(), lastAnchor.top)
+                else hideOverlay()
+            }
         }
-        handler.removeCallbacks(hideRunnable)
-        if (node != null) {
-            target?.recycle()
-            target = AccessibilityNodeInfo.obtain(node)
-        }
-        when {
-            menu != null -> placeCovering(menu)
-            node != null -> positionOverlay(node)
-            else -> placeAt(lastAnchor.centerX(), lastAnchor.top)
-        }
-        node?.recycle()
+    }
+
+    private fun swapTarget(n: AccessibilityNodeInfo) {
+        target?.recycle()
+        target = AccessibilityNodeInfo.obtain(n)
     }
 
     private fun caretRect(node: AccessibilityNodeInfo, bounds: Rect): Rect? {
@@ -296,69 +342,60 @@ class CursorAccessibilityService : AccessibilityService() {
             val pad = dp(8)
             if (out.top < bounds.top - pad || out.bottom > bounds.bottom + pad ||
                 out.left < bounds.left - pad || out.left > bounds.right + pad
-            ) {
-                null
-            } else {
-                out
-            }
-        } catch (e: Exception) {
+            ) null else out
+        } catch (_: Exception) {
             null
         }
     }
 
     private fun positionOverlay(node: AccessibilityNodeInfo) {
-        val sizeDp = Prefs.sizeDp(this)
-        if (overlay == null || builtSizeDp != sizeDp) buildOverlay(sizeDp)
+        ensureOverlay()
         val view = overlay ?: return
         val lp = overlayLp ?: return
-
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
         if (bounds.isEmpty) {
             hideOverlay()
             return
         }
-        val scr = screen()
         val caret = caretRect(node, bounds)
         val w = view.measuredWidth
         val h = view.measuredHeight
         val gap = dp(8)
-
         val refX = caret?.left ?: bounds.centerX()
         val topRef = caret?.top ?: bounds.top
         val bottomRef = caret?.bottom ?: bounds.bottom
-
+        val scr = screen()
         val x = (refX - w / 2).coerceIn(dp(4), max(dp(4), scr.x - w - dp(4)))
-        // Sistem seçim menüsü seçimin hemen üstünde durur; aynı yere, overlay z-order üstte.
         var y = topRef - h - gap
         if (y < dp(24)) y = bottomRef + gap
-        y = y.coerceIn(0, max(0, scr.y - h))
-
         applyPos(view, lp, x, y)
     }
 
-    private fun placeCovering(menu: Rect) {
-        val sizeDp = Prefs.sizeDp(this)
-        if (overlay == null || builtSizeDp != sizeDp) buildOverlay(sizeDp)
+    private fun placeAboveMenu(menu: Rect) {
+        ensureOverlay()
         val view = overlay ?: return
         val lp = overlayLp ?: return
         val w = view.measuredWidth
         val h = view.measuredHeight
-        val x = menu.centerX() - w / 2
         var y = menu.top - h - dp(6)
         if (y < dp(24)) y = menu.bottom + dp(6)
-        applyPos(view, lp, x, y)
+        applyPos(view, lp, menu.centerX() - w / 2, y)
     }
 
     private fun placeAt(refX: Int, topRef: Int) {
-        val sizeDp = Prefs.sizeDp(this)
-        if (overlay == null || builtSizeDp != sizeDp) buildOverlay(sizeDp)
+        ensureOverlay()
         val view = overlay ?: return
         val lp = overlayLp ?: return
         val h = view.measuredHeight
         var y = topRef - h - dp(8)
         if (y < dp(24)) y = topRef + dp(8)
         applyPos(view, lp, refX - view.measuredWidth / 2, y)
+    }
+
+    private fun ensureOverlay() {
+        val sizeDp = Prefs.sizeDp(this)
+        if (overlay == null || builtSizeDp != sizeDp) buildOverlay(sizeDp)
     }
 
     private fun applyPos(view: View, lp: WindowManager.LayoutParams, x: Int, y: Int) {
@@ -392,16 +429,13 @@ class CursorAccessibilityService : AccessibilityService() {
         bg.cornerRadius = h / 2f
         bg.setStroke(dp(1), 0x40FFFFFF)
         row.background = bg
-
         row.addView(arrowButton(R.drawable.ic_arrow_left, -1, h), LinearLayout.LayoutParams(h + dp(12), h))
         val divider = View(this)
         divider.setBackgroundColor(0x33FFFFFF)
         row.addView(divider, LinearLayout.LayoutParams(dp(1), (h * 0.5f).toInt()))
         row.addView(arrowButton(R.drawable.ic_arrow_right, 1, h), LinearLayout.LayoutParams(h + dp(12), h))
-
         val unspec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         row.measure(unspec, unspec)
-
         overlay = row
         builtSizeDp = sizeDp
         val lp = WindowManager.LayoutParams(
@@ -425,7 +459,7 @@ class CursorAccessibilityService : AccessibilityService() {
         img.setColorFilter(Color.WHITE)
         val s = (h * 0.5f).toInt()
         frame.addView(img, FrameLayout.LayoutParams(s, s, Gravity.CENTER))
-        frame.contentDescription = if (dir < 0) "İmleci sola kaydır" else "İmleci sağa kaydır"
+        frame.contentDescription = if (dir < 0) "sola" else "sağa"
         frame.setOnTouchListener(RepeatTouch(dir))
         return frame
     }
@@ -436,15 +470,12 @@ class CursorAccessibilityService : AccessibilityService() {
         if (v != null && attached) {
             try {
                 wm.removeView(v)
-            } catch (e: IllegalArgumentException) {
+            } catch (_: IllegalArgumentException) {
             }
         }
         attached = false
     }
 
-    // ---------- imleci kaydirma ----------
-
-    /** Basili tutunca hizlanan tekrar. */
     private inner class RepeatTouch(private val dir: Int) : View.OnTouchListener {
         private var count = 0
         private val tick = object : Runnable {
@@ -455,7 +486,7 @@ class CursorAccessibilityService : AccessibilityService() {
                 val delay = when {
                     count < 6 -> 90L
                     count < 20 -> 55L
-                    else -> 28L
+                    else -> 32L
                 }
                 handler.postDelayed(this, delay)
             }
@@ -485,22 +516,26 @@ class CursorAccessibilityService : AccessibilityService() {
         if (dir > 0) {
             var n = pos + 1
             if (pos < len && n < len && Character.isHighSurrogate(text[pos]) && Character.isLowSurrogate(text[n])) n++
-            return n
+            return n.coerceAtMost(len)
         }
         if (pos <= 0) return 0
         var n = pos - 1
         if (n > 0 && n < len && Character.isLowSurrogate(text[n]) && Character.isHighSurrogate(text[n - 1])) n--
-        return n
+        return n.coerceAtLeast(0)
     }
 
     private fun setSel(node: AccessibilityNodeInfo, start: Int, end: Int): Boolean {
         val args = Bundle()
         args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, start)
         args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end)
-        return node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+        return try {
+            node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
+        } catch (_: Throwable) {
+            false
+        }
     }
 
-    private fun extendByGranularity(node: AccessibilityNodeInfo, dir: Int): Boolean {
+    private fun extendGranularity(node: AccessibilityNodeInfo, dir: Int): Boolean {
         val args = Bundle()
         args.putInt(
             AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
@@ -511,54 +546,95 @@ class CursorAccessibilityService : AccessibilityService() {
             AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY
         else
             AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY
-        return node.performAction(action, args)
+        return try {
+            node.performAction(action, args)
+        } catch (_: Throwable) {
+            false
+        }
     }
 
-    /** Web'de API yoksa sağ tutamacı birkaç piksel sürükle. */
     private fun dragHandle(dir: Int) {
-        val box = Rect()
-        target?.getBoundsInScreen(box)
-        if (box.isEmpty) box.set(lastAnchor)
-        if (box.isEmpty) return
-        val x = if (dir > 0) box.right.toFloat() - 4f else box.left.toFloat() + 4f
-        val y = box.bottom.toFloat() - 8f
+        val box = Rect(lastAnchor)
+        val scr = screen()
+        if (box.isEmpty || box.width() > scr.x * 0.9 || box.height() > scr.y * 0.5) {
+            val menu = actionModeRect() ?: return
+            box.set(menu.centerX() - dp(20), menu.bottom, menu.centerX() + dp(20), menu.bottom + dp(40))
+        }
+        val x = if (dir > 0) box.right.toFloat() - 6f else box.left.toFloat() + 6f
+        val y = box.bottom.toFloat() - 6f
         val path = Path()
         path.moveTo(x, y)
-        path.lineTo(x + dir * dp(36), y)
-        val stroke = GestureDescription.StrokeDescription(path, 0, 90)
-        dispatchGesture(
-            GestureDescription.Builder().addStroke(stroke).build(),
-            null,
-            null
-        )
+        path.lineTo(x + dir * dp(28), y)
+        try {
+            dispatchGesture(
+                GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+                    .build(),
+                null,
+                null
+            )
+        } catch (_: Throwable) {
+        }
     }
 
     private fun move(dir: Int) {
-        val node = target?.also { it.refresh() }
-            ?: focusedEditable()
-            ?: lastPick?.also { it.refresh() }
+        try {
+            when (mode) {
+                Mode.INPUT -> moveInput(dir)
+                Mode.SELECT -> moveSelect(dir)
+                Mode.HIDE -> {}
+            }
+        } catch (_: Throwable) {
+        }
+    }
 
+    private fun moveInput(dir: Int) {
+        val node = target?.also { it.refresh() } ?: focusedInput() ?: return
+        val text: CharSequence = if (node.isShowingHintText) "" else (node.text ?: "")
+        var start = node.textSelectionStart
+        var end = node.textSelectionEnd
+        if (start < 0 || end < 0) {
+            start = text.length
+            end = text.length
+        }
+        if (start > end) {
+            val t = start; start = end; end = t
+        }
+        val p = if (start != end) {
+            if (dir < 0) start else end
+        } else {
+            step(text, end, dir)
+        }
+        setSel(node, p, p)
+    }
+
+    private fun moveSelect(dir: Int) {
+        val node = target?.also {
+            try {
+                it.refresh()
+            } catch (_: Throwable) {
+            }
+        } ?: lastPick
         if (node != null) {
-            val text: CharSequence = if (node.isShowingHintText) "" else (node.text ?: "")
-            var start = node.textSelectionStart
-            var end = node.textSelectionEnd
+            val text: CharSequence = try {
+                if (node.isShowingHintText) "" else (node.text ?: "")
+            } catch (_: Throwable) {
+                ""
+            }
+            var start = try { node.textSelectionStart } catch (_: Throwable) { -1 }
+            var end = try { node.textSelectionEnd } catch (_: Throwable) { -1 }
             if (start > end) {
                 val t = start; start = end; end = t
             }
-            if (start >= 0 && end >= 0 && text.isNotEmpty()) {
-                if (start != end) {
-                    end = step(text, end, dir).coerceIn(0, text.length)
-                    if (end < start) {
-                        val t = start; start = end; end = t
-                    }
-                    if (setSel(node, start, end)) return
-                } else {
-                    val p = step(text, end, dir).coerceIn(0, text.length)
-                    if (setSel(node, p, p)) return
+            if (isInputField(node) && start >= 0 && end >= 0 && text.isNotEmpty()) {
+                end = step(text, if (start == end) end else end, dir).coerceIn(0, text.length)
+                if (end < start) {
+                    val t = start; start = end; end = t
                 }
+                if (setSel(node, start, end)) return
             }
-            if (extendByGranularity(node, dir)) return
+            if (extendGranularity(node, dir)) return
         }
-        dragHandle(dir)
+        handler.post { dragHandle(dir) }
     }
 }
