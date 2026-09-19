@@ -51,6 +51,8 @@ class CursorAccessibilityService : AccessibilityService() {
     private var overlayLp: WindowManager.LayoutParams? = null
     private var attached = false
     private var builtSizeDp = -1
+    private var lastPick: AccessibilityNodeInfo? = null
+    private var target: AccessibilityNodeInfo? = null
 
     private val updateRunnable = Runnable { update() }
     private val hideRunnable = Runnable { hideOverlay() }
@@ -74,8 +76,23 @@ class CursorAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED,
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
             AccessibilityEvent.TYPE_VIEW_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> schedule()
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
+                val src = event.source
+                if (src != null &&
+                    (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED ||
+                        event.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED ||
+                        event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED)
+                ) {
+                    lastPick?.recycle()
+                    lastPick = AccessibilityNodeInfo.obtain(src)
+                    src.recycle()
+                } else {
+                    src?.recycle()
+                }
+                schedule()
+            }
         }
     }
 
@@ -161,14 +178,36 @@ class CursorAccessibilityService : AccessibilityService() {
         return if (node.isEditable) node else null
     }
 
-    private fun imeVisible(): Boolean {
-        val ws = try {
-            windows
-        } catch (e: Exception) {
-            emptyList<AccessibilityWindowInfo>()
+    private fun hasRange(n: AccessibilityNodeInfo): Boolean {
+        val s = n.textSelectionStart
+        val e = n.textSelectionEnd
+        return s >= 0 && e >= 0 && s != e
+    }
+
+    private fun findSelection(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (hasRange(n) || (n.isEditable && n.isFocused)) {
+            return AccessibilityNodeInfo.obtain(n)
         }
-        if (ws.isEmpty()) return true
-        return ws.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            val f = findSelection(c)
+            c.recycle()
+            if (f != null) return f
+        }
+        return null
+    }
+
+    private fun pickNode(): AccessibilityNodeInfo? {
+        focusedEditable()?.let { return it }
+        lastPick?.let { p ->
+            if (p.refresh() && (hasRange(p) || p.isEditable)) {
+                return AccessibilityNodeInfo.obtain(p)
+            }
+        }
+        val root = rootInActiveWindow ?: return null
+        val found = findSelection(root)
+        root.recycle()
+        return found
     }
 
     // ---------- gosterme / konumlandirma ----------
@@ -178,8 +217,8 @@ class CursorAccessibilityService : AccessibilityService() {
             hideOverlay()
             return
         }
-        val node = focusedEditable()
-        if (node == null || !imeVisible()) {
+        val node = pickNode()
+        if (node == null) {
             if (attached) {
                 handler.removeCallbacks(hideRunnable)
                 handler.postDelayed(hideRunnable, 250)
@@ -187,7 +226,10 @@ class CursorAccessibilityService : AccessibilityService() {
             return
         }
         handler.removeCallbacks(hideRunnable)
+        target?.recycle()
+        target = AccessibilityNodeInfo.obtain(node)
         positionOverlay(node)
+        node.recycle()
     }
 
     private fun caretRect(node: AccessibilityNodeInfo, bounds: Rect): Rect? {
@@ -245,6 +287,7 @@ class CursorAccessibilityService : AccessibilityService() {
         val bottomRef = caret?.bottom ?: bounds.bottom
 
         val x = (refX - w / 2).coerceIn(dp(4), max(dp(4), scr.x - w - dp(4)))
+        // Sistem seçim menüsü seçimin hemen üstünde durur; aynı yere, overlay z-order üstte.
         var y = topRef - h - gap
         if (y < dp(24)) y = bottomRef + gap
         y = y.coerceIn(0, max(0, scr.y - h))
@@ -290,6 +333,7 @@ class CursorAccessibilityService : AccessibilityService() {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         )
@@ -373,7 +417,7 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     private fun move(dir: Int) {
-        val node = focusedEditable() ?: return
+        val node = target?.also { it.refresh() } ?: focusedEditable() ?: return
         val text: CharSequence = if (node.isShowingHintText) "" else (node.text ?: "")
         var start = node.textSelectionStart
         var end = node.textSelectionEnd
