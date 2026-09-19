@@ -340,7 +340,12 @@ class CursorAccessibilityService : AccessibilityService() {
         if (overlay == null || builtSizeDp != sizeDp) buildOverlay(sizeDp)
         val view = overlay ?: return
         val lp = overlayLp ?: return
-        applyPos(view, lp, menu.centerX() - view.measuredWidth / 2, menu.centerY() - view.measuredHeight / 2)
+        val w = view.measuredWidth
+        val h = view.measuredHeight
+        val x = menu.centerX() - w / 2
+        var y = menu.top - h - dp(6)
+        if (y < dp(24)) y = menu.bottom + dp(6)
+        applyPos(view, lp, x, y)
     }
 
     private fun placeAt(refX: Int, topRef: Int) {
