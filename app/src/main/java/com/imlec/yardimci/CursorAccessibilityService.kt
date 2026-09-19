@@ -13,6 +13,7 @@ import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -53,6 +54,8 @@ class CursorAccessibilityService : AccessibilityService() {
     private var builtSizeDp = -1
     private var lastPick: AccessibilityNodeInfo? = null
     private var target: AccessibilityNodeInfo? = null
+    private val lastAnchor = Rect()
+    private var anchorAt = 0L
 
     private val updateRunnable = Runnable { update() }
     private val hideRunnable = Runnable { hideOverlay() }
@@ -82,11 +85,12 @@ class CursorAccessibilityService : AccessibilityService() {
                 val src = event.source
                 if (src != null &&
                     (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED ||
-                        event.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED ||
-                        event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED)
+                        event.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED)
                 ) {
                     lastPick?.recycle()
                     lastPick = AccessibilityNodeInfo.obtain(src)
+                    src.getBoundsInScreen(lastAnchor)
+                    anchorAt = SystemClock.uptimeMillis()
                     src.recycle()
                 } else {
                     src?.recycle()
@@ -112,6 +116,10 @@ class CursorAccessibilityService : AccessibilityService() {
         instance = null
         handler.removeCallbacksAndMessages(null)
         hideOverlay()
+        lastPick?.recycle()
+        lastPick = null
+        target?.recycle()
+        target = null
         try {
             NotificationManagerCompat.from(this).cancel(NOTIF_ID)
         } catch (e: SecurityException) {
@@ -200,14 +208,38 @@ class CursorAccessibilityService : AccessibilityService() {
     private fun pickNode(): AccessibilityNodeInfo? {
         focusedEditable()?.let { return it }
         lastPick?.let { p ->
-            if (p.refresh() && (hasRange(p) || p.isEditable)) {
-                return AccessibilityNodeInfo.obtain(p)
-            }
+            if (p.refresh()) return AccessibilityNodeInfo.obtain(p)
         }
         val root = rootInActiveWindow ?: return null
         val found = findSelection(root)
         root.recycle()
         return found
+    }
+
+    /** Sistem seçim şeridi (Kopyala / Tümünü seç) küçük bir pencere olarak durur. */
+    private fun actionModeRect(): Rect? {
+        val ws = try {
+            windows
+        } catch (_: Exception) {
+            return null
+        }
+        val scr = screen()
+        val minH = dp(32)
+        val maxH = dp(100)
+        val minW = dp(96)
+        var best: Rect? = null
+        for (w in ws) {
+            if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            if (w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+            val b = Rect()
+            w.getBoundsInScreen(b)
+            if (b.height() in minH..maxH && b.width() in minW until scr.x - dp(4) &&
+                b.top > dp(36) && b.bottom < scr.y - dp(24)
+            ) {
+                best = b
+            }
+        }
+        return best
     }
 
     // ---------- gosterme / konumlandirma ----------
@@ -217,8 +249,10 @@ class CursorAccessibilityService : AccessibilityService() {
             hideOverlay()
             return
         }
+        val menu = actionModeRect()
         val node = pickNode()
-        if (node == null) {
+        val recent = SystemClock.uptimeMillis() - anchorAt < 8000 && !lastAnchor.isEmpty
+        if (node == null && menu == null && !recent) {
             if (attached) {
                 handler.removeCallbacks(hideRunnable)
                 handler.postDelayed(hideRunnable, 250)
@@ -226,10 +260,16 @@ class CursorAccessibilityService : AccessibilityService() {
             return
         }
         handler.removeCallbacks(hideRunnable)
-        target?.recycle()
-        target = AccessibilityNodeInfo.obtain(node)
-        positionOverlay(node)
-        node.recycle()
+        if (node != null) {
+            target?.recycle()
+            target = AccessibilityNodeInfo.obtain(node)
+        }
+        when {
+            menu != null -> placeCovering(menu)
+            node != null -> positionOverlay(node)
+            else -> placeAt(lastAnchor.centerX(), lastAnchor.top)
+        }
+        node?.recycle()
     }
 
     private fun caretRect(node: AccessibilityNodeInfo, bounds: Rect): Rect? {
