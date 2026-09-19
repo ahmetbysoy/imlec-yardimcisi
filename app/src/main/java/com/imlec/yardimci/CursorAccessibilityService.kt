@@ -38,6 +38,7 @@ import kotlin.math.max
  *  INPUT  — odak editable yazı kutusu (WhatsApp, form). Oklar imleci kaydırır.
  *  SELECT — sistem seçim şeridi veya uzun basış, kutu değil. Oklar seçimi uzatır.
  * WebView ağacı taranmaz (çökme nedeni). typeAllMask yok.
+ * Klavye açıkken oklar yazı alanının üstüne değil, klavyenin hemen üstünde ekran ortasında sabitlenir.
  */
 class CursorAccessibilityService : AccessibilityService() {
 
@@ -218,14 +219,30 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun imeVisible(): Boolean {
+    /** Klavyenin gerçek üst sınırı; okları yazı alanından çıkarıp buraya sabitlemek için. */
+    private fun imeRect(): Rect? {
         val ws = try {
             windows
         } catch (_: Exception) {
-            return false
+            return null
         }
-        return ws.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        var best: Rect? = null
+        for (w in ws) {
+            if (w.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val b = Rect()
+            try {
+                w.getBoundsInScreen(b)
+            } catch (_: Throwable) {
+                continue
+            }
+            if (b.isEmpty || b.top <= 0) continue
+            val previous = best
+            if (previous == null || b.height() > previous.height()) best = Rect(b)
+        }
+        return best
     }
+
+    private fun imeVisible(): Boolean = imeRect() != null
 
     /** Sistem Kopyala şeridi: kısa, geniş, tam ekran değil. */
     private fun actionModeRect(): Rect? {
@@ -293,7 +310,8 @@ class CursorAccessibilityService : AccessibilityService() {
                 val n = focusedInput()
                 if (n != null) {
                     swapTarget(n)
-                    positionOverlay(n)
+                    val ime = imeRect()
+                    if (ime != null) placeAboveKeyboard(ime) else positionOverlay(n)
                     n.recycle()
                 } else {
                     hideOverlay()
@@ -307,8 +325,10 @@ class CursorAccessibilityService : AccessibilityService() {
                     } catch (_: Throwable) {
                     }
                 }
+                val ime = imeRect()
                 val menu = actionModeRect()
-                if (menu != null) placeAboveMenu(menu)
+                if (ime != null) placeAboveKeyboard(ime)
+                else if (menu != null) placeAboveMenu(menu)
                 else if (!lastAnchor.isEmpty) placeAt(lastAnchor.centerX(), lastAnchor.top)
                 else hideOverlay()
             }
@@ -369,6 +389,17 @@ class CursorAccessibilityService : AccessibilityService() {
         val x = (refX - w / 2).coerceIn(dp(4), max(dp(4), scr.x - w - dp(4)))
         var y = topRef - h - gap
         if (y < dp(24)) y = bottomRef + gap
+        applyPos(view, lp, x, y)
+    }
+
+    /** Klavye açıkken sabit hedef: ekranın ortası, klavyenin hemen üstü. */
+    private fun placeAboveKeyboard(ime: Rect) {
+        ensureOverlay()
+        val view = overlay ?: return
+        val lp = overlayLp ?: return
+        val scr = screen()
+        val x = (scr.x - view.measuredWidth) / 2
+        val y = ime.top - view.measuredHeight - dp(6)
         applyPos(view, lp, x, y)
     }
 
