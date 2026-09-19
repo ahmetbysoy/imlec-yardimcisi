@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">İmleç yardımcısı</string>
     <string name="a11y_label">İmleç yardımcısı</string>
-    <string name="a11y_desc">Metin kutusuna odaklanınca imlecin yanında sağ ve sol okları gösterir; imleci karakter karakter kaydırır. Yazdığın metin okunmaz, kaydedilmez ve cihaz dışına gönderilmez.</string>
+    <string name="a11y_desc">Metin kutusuna odaklanınca imlecin yanında sağ ve sol okları gösterir; imleci karakter karakter kaydırır. İmleç konumunu hesaplamak için yalnızca odaktaki kutuya bakar; hiçbir şey kaydedilmez ve cihaz dışına gönderilmez (uygulamada internet izni yok).</string>
 </resources>

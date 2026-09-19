@@ -220,7 +220,7 @@ fun MainScreen() {
             onDismissRequest = { dismissed = true },
             title = { Text("Erişilebilirlik izni gerekli") },
             text = {
-                Text("Oklar için erişilebilirlik ayarlarında İmleç yardımcısı'nı aç. Yazdığın metin okunmaz, kaydedilmez ve cihaz dışına gönderilmez.")
+                Text("Oklar için erişilebilirlik ayarlarında İmleç yardımcısı'nı aç. Yalnızca imleç konumunu hesaplamak için odaktaki kutuya bakar; hiçbir şey kaydedilmez ve cihaz dışına gönderilmez (uygulamada internet izni yok).")
             },
             confirmButton = {
                 TextButton(onClick = {

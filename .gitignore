@@ -4,3 +4,8 @@ local.properties
 *.iml
 .idea/
 .DS_Store
+
+# imza anahtari repoda tutulmaz (GitHub Secrets)
+keystore/
+*.jks
+*.keystore

@@ -18,6 +18,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -49,6 +50,12 @@ class CursorAccessibilityService : AccessibilityService() {
         var instance: CursorAccessibilityService? = null
         private const val CHANNEL_ID = "cursor_status"
         private const val NOTIF_ID = 2001
+        private const val TAG = "Imlec"
+    }
+
+    /** Beklenmeyen hataları sessizce yutma: logcat'e yaz (metin içeriği asla loglanmaz). */
+    private fun warn(e: Throwable) {
+        Log.w(TAG, "beklenmeyen hata", e)
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -66,7 +73,8 @@ class CursorAccessibilityService : AccessibilityService() {
     private val updateRunnable = Runnable {
         try {
             update()
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            warn(e)
         }
     }
     private val hideRunnable = Runnable { hideOverlay() }
@@ -102,7 +110,8 @@ class CursorAccessibilityService : AccessibilityService() {
             }
             src?.recycle()
             schedule()
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            warn(e)
         }
     }
 
@@ -144,13 +153,18 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private fun remember(src: AccessibilityNodeInfo, longPress: Boolean) {
         try {
+            val range = hasRange(src)
+            // Uzun basış yalnızca metin taşıyan öğede seçim sinyali sayılır (simge/düğme değil).
+            val textual = longPress && !src.isPassword && !src.text.isNullOrEmpty()
+            if (!range && !textual && !isInputField(src)) return
             lastPick?.recycle()
             lastPick = AccessibilityNodeInfo.obtain(src)
             src.getBoundsInScreen(lastAnchor)
-            if (longPress || hasRange(src)) {
+            if (range || textual) {
                 anchorAt = SystemClock.uptimeMillis()
             }
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            warn(e)
         }
     }
 
@@ -232,7 +246,8 @@ class CursorAccessibilityService : AccessibilityService() {
             val b = Rect()
             try {
                 w.getBoundsInScreen(b)
-            } catch (_: Throwable) {
+            } catch (e: Exception) {
+                warn(e)
                 continue
             }
             if (b.isEmpty || b.top <= 0) continue
@@ -272,18 +287,22 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     private fun classify(): Mode {
-        val menu = actionModeRect()
         val input = focusedInput()
+        val inputRange = input != null && hasRange(input)
         val recentSelect = SystemClock.uptimeMillis() - anchorAt < 6000 && !lastAnchor.isEmpty
+        // Menü buluşsal yöntemi yalnızca seçim kanıtı varken çalışır: rastgele küçük bir pencere
+        // (snackbar, başka overlay) seçim menüsü sanılmasın.
+        val menu = if (recentSelect || inputRange) actionModeRect() else null
         val pickEditable = try {
             lastPick?.refresh() == true && lastPick?.let { isInputField(it) } == true
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            warn(e)
             false
         }
 
         val result = when {
             menu != null && input == null -> Mode.SELECT
-            menu != null && input != null && hasRange(input) -> Mode.SELECT
+            menu != null && inputRange -> Mode.SELECT
             input != null && (imeVisible() || input.isFocused) -> Mode.INPUT
             recentSelect && !pickEditable -> Mode.SELECT
             else -> Mode.HIDE
@@ -321,8 +340,9 @@ class CursorAccessibilityService : AccessibilityService() {
                 handler.removeCallbacks(hideRunnable)
                 lastPick?.let { p ->
                     try {
-                        if (p.refresh()) swapTarget(AccessibilityNodeInfo.obtain(p))
-                    } catch (_: Throwable) {
+                        if (p.refresh()) swapTarget(p)
+                    } catch (e: Exception) {
+                        warn(e)
                     }
                 }
                 val ime = imeRect()
@@ -341,6 +361,7 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     private fun caretRect(node: AccessibilityNodeInfo, bounds: Rect): Rect? {
+        if (node.isPassword) return null
         val text = node.text ?: return null
         if (node.isShowingHintText || text.isEmpty()) return null
         val end = node.textSelectionEnd
@@ -444,7 +465,8 @@ class CursorAccessibilityService : AccessibilityService() {
                 lp.y = ny
                 wm.updateViewLayout(view, lp)
             }
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            warn(e)
             attached = false
         }
     }
@@ -512,7 +534,7 @@ class CursorAccessibilityService : AccessibilityService() {
         private val tick = object : Runnable {
             override fun run() {
                 if (!attached) return
-                move(dir)
+                move(dir, true)
                 count++
                 val delay = when {
                     count < 6 -> 90L
@@ -527,7 +549,7 @@ class CursorAccessibilityService : AccessibilityService() {
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     v.alpha = 0.55f
-                    move(dir)
+                    move(dir, false)
                     count = 0
                     handler.removeCallbacks(tick)
                     handler.postDelayed(tick, 380)
@@ -541,9 +563,30 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
+    private val breaker: android.icu.text.BreakIterator by lazy {
+        android.icu.text.BreakIterator.getCharacterInstance()
+    }
+
+    /** Bir "kullanıcı karakteri" (grapheme) ileri/geri: ZWJ emojiler, bayraklar, cilt tonları tek adım. */
     private fun step(text: CharSequence, pos: Int, dir: Int): Int {
         val len = text.length
-        if (len == 0) return max(0, pos + dir)
+        if (len == 0) return 0
+        val p = pos.coerceIn(0, len)
+        try {
+            val bi = breaker
+            bi.setText(text.toString())
+            val r = if (dir > 0) bi.following(p) else bi.preceding(p)
+            if (r != android.icu.text.BreakIterator.DONE) return r.coerceIn(0, len)
+            return if (dir > 0) len else 0
+        } catch (e: Exception) {
+            warn(e)
+        }
+        return stepUtf16(text, p, dir)
+    }
+
+    /** Yedek: yalnızca surrogate çiftine saygılı adım. */
+    private fun stepUtf16(text: CharSequence, pos: Int, dir: Int): Int {
+        val len = text.length
         if (dir > 0) {
             var n = pos + 1
             if (pos < len && n < len && Character.isHighSurrogate(text[pos]) && Character.isLowSurrogate(text[n])) n++
@@ -555,40 +598,55 @@ class CursorAccessibilityService : AccessibilityService() {
         return n.coerceAtLeast(0)
     }
 
+    private fun refreshOk(n: AccessibilityNodeInfo): Boolean =
+        try {
+            n.refresh()
+        } catch (e: Exception) {
+            warn(e)
+            false
+        }
+
     private fun setSel(node: AccessibilityNodeInfo, start: Int, end: Int): Boolean {
         val args = Bundle()
         args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, start)
         args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end)
         return try {
             node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, args)
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            warn(e)
             false
         }
     }
 
-    private fun extendGranularity(node: AccessibilityNodeInfo, dir: Int): Boolean {
+    /**
+     * Sistemin karakter granülerliği: grapheme/RTL güvenli, metni çekmez.
+     * extend=true: seçimi uzatır, anchor korunur, yalnızca odak ucu oynar.
+     */
+    private fun moveByGranularity(node: AccessibilityNodeInfo, dir: Int, extend: Boolean): Boolean {
         val args = Bundle()
         args.putInt(
             AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
             AccessibilityNodeInfo.MOVEMENT_GRANULARITY_CHARACTER
         )
-        args.putBoolean(AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN, true)
+        args.putBoolean(AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN, extend)
         val action = if (dir > 0)
             AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY
         else
             AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY
         return try {
             node.performAction(action, args)
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            warn(e)
             false
         }
     }
 
     private fun dragHandle(dir: Int) {
+        // Seçim menüsü görünmüyorsa asla dokunma jesti gönderme (yanlış yere basmayı önler).
+        val menu = actionModeRect() ?: return
         val box = Rect(lastAnchor)
         val scr = screen()
         if (box.isEmpty || box.width() > scr.x * 0.9 || box.height() > scr.y * 0.5) {
-            val menu = actionModeRect() ?: return
             box.set(menu.centerX() - dp(20), menu.bottom, menu.centerX() + dp(20), menu.bottom + dp(40))
         }
         val x = if (dir > 0) box.right.toFloat() - 6f else box.left.toFloat() + 6f
@@ -604,68 +662,76 @@ class CursorAccessibilityService : AccessibilityService() {
                 null,
                 null
             )
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            warn(e)
         }
     }
 
-    private fun move(dir: Int) {
+    /** repeat=true: basılı tutma tıkı; her tıkta refresh/metin çekmeden hızlı yol kullanılır. */
+    private fun move(dir: Int, repeat: Boolean) {
         try {
             when (mode) {
-                Mode.INPUT -> moveInput(dir)
+                Mode.INPUT -> moveInput(dir, repeat)
                 Mode.SELECT -> moveSelect(dir)
                 Mode.HIDE -> {}
             }
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            warn(e)
         }
     }
 
-    private fun moveInput(dir: Int) {
-        val node = target?.also { it.refresh() } ?: focusedInput() ?: return
-        val text: CharSequence = if (node.isShowingHintText) "" else (node.text ?: "")
-        var start = node.textSelectionStart
-        var end = node.textSelectionEnd
+    private fun moveInput(dir: Int, repeat: Boolean) {
+        val node = target ?: focusedInput() ?: return
+        if (!repeat && refreshOk(node) && hasRange(node)) {
+            // İlk basış: aralık seçiliyse ok tuşu gibi daralt (sola = başa, sağa = sona).
+            val lo = minOf(node.textSelectionStart, node.textSelectionEnd)
+            val hi = maxOf(node.textSelectionStart, node.textSelectionEnd)
+            val p = if (dir < 0) lo else hi
+            setSel(node, p, p)
+            return
+        }
+        if (moveByGranularity(node, dir, false)) return
+
+        // Yedek yol (uygulama granülerliği desteklemiyorsa). Şifre alanında metne hiç bakılmaz.
+        if (node.isPassword) return
+        val live = if (refreshOk(node)) node else (focusedInput() ?: return)
+        val text: CharSequence = if (live.isShowingHintText) "" else (live.text ?: "")
+        var start = live.textSelectionStart
+        var end = live.textSelectionEnd
         if (start < 0 || end < 0) {
             start = text.length
             end = text.length
         }
-        if (start > end) {
-            val t = start; start = end; end = t
-        }
-        val p = if (start != end) {
-            if (dir < 0) start else end
+        val lo = minOf(start, end)
+        val hi = maxOf(start, end)
+        val p = if (lo != hi) {
+            if (dir < 0) lo else hi
         } else {
-            step(text, end, dir)
+            step(text, hi, dir)
         }
-        setSel(node, p, p)
+        setSel(live, p, p)
     }
 
     private fun moveSelect(dir: Int) {
-        val node = target?.also {
-            try {
-                it.refresh()
-            } catch (_: Throwable) {
-            }
-        } ?: lastPick
+        val node = target?.also { refreshOk(it) } ?: lastPick
         if (node != null) {
-            val text: CharSequence = try {
-                if (node.isShowingHintText) "" else (node.text ?: "")
-            } catch (_: Throwable) {
-                ""
-            }
-            var start = try { node.textSelectionStart } catch (_: Throwable) { -1 }
-            var end = try { node.textSelectionEnd } catch (_: Throwable) { -1 }
-            if (start > end) {
-                val t = start; start = end; end = t
-            }
-            if (isInputField(node) && start >= 0 && end >= 0 && text.isNotEmpty()) {
-                end = step(text, if (start == end) end else end, dir).coerceIn(0, text.length)
-                if (end < start) {
-                    val t = start; start = end; end = t
+            // 1) Sistemin seçim uzatması: anchor korunur, yalnızca odak ucu oynar.
+            if (moveByGranularity(node, dir, true)) return
+
+            // 2) Yedek: anchor = textSelectionStart, odak = textSelectionEnd. Swap YOK, anchor sabit kalır.
+            if (isInputField(node) && !node.isPassword) {
+                val text: CharSequence = if (node.isShowingHintText) "" else (node.text ?: "")
+                val anchor = node.textSelectionStart
+                val focus = node.textSelectionEnd
+                if (anchor >= 0 && focus >= 0 && text.isNotEmpty()) {
+                    val nf = step(text, focus, dir).coerceIn(0, text.length)
+                    if (nf != focus && setSel(node, anchor, nf)) return
                 }
-                if (setSel(node, start, end)) return
             }
-            if (extendGranularity(node, dir)) return
         }
-        handler.post { dragHandle(dir) }
+        // 3) Son çare (web seçimi): yalnızca yakın zamanda gerçek seçim sinyali varsa.
+        if (SystemClock.uptimeMillis() - anchorAt < 6000) {
+            handler.post { dragHandle(dir) }
+        }
     }
 }

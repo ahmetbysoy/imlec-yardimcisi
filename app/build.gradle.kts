@@ -11,23 +11,30 @@ android {
         applicationId = "com.imlec.yardimci"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        // CI'da her build artar (Actions run numarası); yerelde 1
+        val runNo = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionCode = runNo
+        versionName = "1.0.$runNo"
     }
 
+    // Imza bilgileri repoda tutulmaz: CI, GitHub Secrets'tan KEYSTORE_* ortam degiskenlerini verir.
+    val ksPath = System.getenv("KEYSTORE_PATH")
     signingConfigs {
-        create("personal") {
-            storeFile = rootProject.file("keystore/personal.jks")
-            storePassword = "imlecyardimci"
-            keyAlias = "personal"
-            keyPassword = "imlecyardimci"
-            storeType = "pkcs12"
+        if (ksPath != null) {
+            create("personal") {
+                val pw = System.getenv("KEYSTORE_PASSWORD")
+                storeFile = file(ksPath)
+                storePassword = pw
+                keyAlias = System.getenv("KEY_ALIAS") ?: "personal"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: pw
+                storeType = "pkcs12"
+            }
         }
     }
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("personal")
+            signingConfig = signingConfigs.findByName("personal") ?: signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
