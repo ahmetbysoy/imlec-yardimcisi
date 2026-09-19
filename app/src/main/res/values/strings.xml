@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">İmleç yardımcısı</string>
+    <string name="a11y_label">İmleç yardımcısı</string>
+    <string name="a11y_desc">Metin kutusuna odaklanınca imlecin yanında sağ ve sol okları gösterir; imleci karakter karakter kaydırır. Yazdığın metin okunmaz, kaydedilmez ve cihaz dışına gönderilmez.</string>
+</resources>
