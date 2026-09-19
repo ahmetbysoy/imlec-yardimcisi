@@ -332,15 +332,45 @@ class CursorAccessibilityService : AccessibilityService() {
         if (y < dp(24)) y = bottomRef + gap
         y = y.coerceIn(0, max(0, scr.y - h))
 
-        if (!attached) {
-            lp.x = x
-            lp.y = y
-            wm.addView(view, lp)
-            attached = true
-        } else if (lp.x != x || lp.y != y) {
-            lp.x = x
-            lp.y = y
-            wm.updateViewLayout(view, lp)
+        applyPos(view, lp, x, y)
+    }
+
+    private fun placeCovering(menu: Rect) {
+        val sizeDp = Prefs.sizeDp(this)
+        if (overlay == null || builtSizeDp != sizeDp) buildOverlay(sizeDp)
+        val view = overlay ?: return
+        val lp = overlayLp ?: return
+        applyPos(view, lp, menu.centerX() - view.measuredWidth / 2, menu.centerY() - view.measuredHeight / 2)
+    }
+
+    private fun placeAt(refX: Int, topRef: Int) {
+        val sizeDp = Prefs.sizeDp(this)
+        if (overlay == null || builtSizeDp != sizeDp) buildOverlay(sizeDp)
+        val view = overlay ?: return
+        val lp = overlayLp ?: return
+        val h = view.measuredHeight
+        var y = topRef - h - dp(8)
+        if (y < dp(24)) y = topRef + dp(8)
+        applyPos(view, lp, refX - view.measuredWidth / 2, y)
+    }
+
+    private fun applyPos(view: View, lp: WindowManager.LayoutParams, x: Int, y: Int) {
+        val scr = screen()
+        val nx = x.coerceIn(0, max(0, scr.x - view.measuredWidth))
+        val ny = y.coerceIn(0, max(0, scr.y - view.measuredHeight))
+        try {
+            if (!attached) {
+                lp.x = nx
+                lp.y = ny
+                wm.addView(view, lp)
+                attached = true
+            } else if (lp.x != nx || lp.y != ny) {
+                lp.x = nx
+                lp.y = ny
+                wm.updateViewLayout(view, lp)
+            }
+        } catch (_: Throwable) {
+            attached = false
         }
     }
 
