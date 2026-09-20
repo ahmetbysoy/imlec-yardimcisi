@@ -7,6 +7,7 @@ Basılı tutunca hızlanır. Klavye değil, not defteri değil: yalnızca imleç
 - Erişilebilirlik servisi odaktaki düzenlenebilir kutuyu ve imleç konumunu görür, oklar `ACTION_SET_SELECTION` ile imleci kaydırır.
 - Oklar erişilebilirlik overlay penceresinde çizilir (ayrı "üstünde göster" izni gerekmez).
 - Yalnızca imleç konumunu hesaplamak için odaktaki kutuya bakar; hiçbir şey kaydedilmez ve ağa gönderilmez (manifestte `INTERNET` izni yok). Şifre alanlarında metin içeriğine hiç bakılmaz.
+- INPUT ve SELECT modlarında kapsül daima mavi ve kompakttır; varsayılan ok boyutu 36 dp'dir ve uygulama içinden 32–48 dp arasında ayarlanabilir.
 
 ## Seçim modu
 Seçili metinde oklar mavi olur; ortadaki düğme hangi ucun (sol/sağ) oynayacağını seçer, uçlar birbirini geçmez. Seçim kendi modelimizle `ACTION_SET_SELECTION` (start<=end) ile yazılır; granülerlik eylemi seçimi imlece indirdiği için seçim modunda kullanılmaz (AOSP `setAccessibilitySelection` -> `stopTextActionMode`).

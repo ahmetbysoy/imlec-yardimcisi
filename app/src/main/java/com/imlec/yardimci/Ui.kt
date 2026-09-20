@@ -196,8 +196,8 @@ fun MainScreen() {
                 Prefs.setSizeDp(ctx, sizeDp)
                 CursorAccessibilityService.instance?.onSettingsChanged()
             },
-            valueRange = 36f..60f,
-            steps = 5
+            valueRange = 32f..48f,
+            steps = 3
         )
 
         Text(

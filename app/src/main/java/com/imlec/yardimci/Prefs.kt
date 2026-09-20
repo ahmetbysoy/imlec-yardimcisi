@@ -10,13 +10,34 @@ import android.provider.Settings
 import androidx.core.content.ContextCompat
 
 object Prefs {
+    private const val DEFAULT_SIZE_DP = 36
+    private const val MIN_SIZE_DP = 32
+    private const val MAX_SIZE_DP = 48
+    private const val SIZE_MIGRATION = "sizeDpCompactV1"
+
     private fun p(ctx: Context) = ctx.getSharedPreferences("imlec", Context.MODE_PRIVATE)
 
     fun enabled(ctx: Context): Boolean = p(ctx).getBoolean("enabled", true)
     fun setEnabled(ctx: Context, v: Boolean) = p(ctx).edit().putBoolean("enabled", v).apply()
 
-    fun sizeDp(ctx: Context): Int = p(ctx).getInt("sizeDp", 44)
-    fun setSizeDp(ctx: Context, v: Int) = p(ctx).edit().putInt("sizeDp", v).apply()
+    fun sizeDp(ctx: Context): Int {
+        val prefs = p(ctx)
+        if (!prefs.getBoolean(SIZE_MIGRATION, false)) {
+            // Önceki varsayılan 44 dp idi; kompakt sürümde yalnızca eski varsayılanı küçült.
+            val old = prefs.getInt("sizeDp", DEFAULT_SIZE_DP)
+            val compact = if (old == 44) DEFAULT_SIZE_DP else old.coerceIn(MIN_SIZE_DP, MAX_SIZE_DP)
+            prefs.edit().putInt("sizeDp", compact).putBoolean(SIZE_MIGRATION, true).apply()
+            return compact
+        }
+        return prefs.getInt("sizeDp", DEFAULT_SIZE_DP).coerceIn(MIN_SIZE_DP, MAX_SIZE_DP)
+    }
+
+    fun setSizeDp(ctx: Context, v: Int) {
+        p(ctx).edit()
+            .putInt("sizeDp", v.coerceIn(MIN_SIZE_DP, MAX_SIZE_DP))
+            .putBoolean(SIZE_MIGRATION, true)
+            .apply()
+    }
 }
 
 object Perms {

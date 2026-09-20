@@ -57,8 +57,8 @@ class CursorAccessibilityService : AccessibilityService() {
         private const val CHANNEL_ID = "cursor_status"
         private const val NOTIF_ID = 2001
         private const val TAG = "Imlec"
-        private val COLOR_INPUT = 0xE6202024.toInt()
-        private val COLOR_SELECT = 0xE61A4FA0.toInt()
+        // Her iki modda da aynı kompakt mavi kapsül kullanılır.
+        private val COLOR_OVERLAY = 0xE61A4FA0.toInt()
     }
 
     /** Beklenmeyen hataları sessizce yutma: logcat'e yaz (metin içeriği asla loglanmaz). */
@@ -560,7 +560,7 @@ class CursorAccessibilityService : AccessibilityService() {
         edgeIcon?.setImageResource(if (edgeLeft) R.drawable.ic_edge_left else R.drawable.ic_edge_right)
     }
 
-    /** INPUT: koyu kapsül, iki ok. SELECT: mavi kapsül + ortada "hangi uç oynuyor" düğmesi. */
+    /** INPUT ve SELECT: aynı mavi kompakt kapsül; SELECT'te ortada uç seçici görünür. */
     private fun applyModeUi() {
         val row = overlay ?: return
         if (uiMode == mode) return
@@ -568,7 +568,7 @@ class CursorAccessibilityService : AccessibilityService() {
         val sel = mode == Mode.SELECT
         edgeBtn?.visibility = if (sel) View.VISIBLE else View.GONE
         edgeDiv?.visibility = if (sel) View.VISIBLE else View.GONE
-        overlayBg?.setColor(if (sel) COLOR_SELECT else COLOR_INPUT)
+        overlayBg?.setColor(COLOR_OVERLAY)
         updateEdgeIcon()
         val unspec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         row.measure(unspec, unspec)
@@ -581,7 +581,7 @@ class CursorAccessibilityService : AccessibilityService() {
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
         val bg = GradientDrawable()
-        bg.setColor(COLOR_INPUT)
+        bg.setColor(COLOR_OVERLAY)
         bg.cornerRadius = h / 2f
         bg.setStroke(dp(1), 0x40FFFFFF)
         row.background = bg
