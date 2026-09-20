@@ -39,6 +39,12 @@ import kotlin.math.max
  *  INPUT  — odak editable yazı kutusu (WhatsApp, form). Oklar imleci kaydırır.
  *  SELECT — sistem seçim şeridi veya uzun basış, kutu değil. Oklar seçimi uzatır.
  * WebView ağacı taranmaz (çökme nedeni). typeAllMask yok.
+ *
+ * SEÇİM İÇİN ÖĞRENİLEN (AOSP TextView/Editor, Android 10–15 aynı):
+ *  - ACTION_NEXT/PREVIOUS_AT_MOVEMENT_GRANULARITY -> setAccessibilitySelection() -> stopTextActionMode()
+ *    -> Editor.onDestroyActionMode -> seçim imlece İNDİRGENİR. Yani seçim modunda granülerlik KULLANILMAZ.
+ *  - ACTION_SET_SELECTION start <= end ister (ters aralık reddedilir) ve seçim modunu yeniden başlatır.
+ *  - Bu yüzden seçimi kendi modelimizde (selStart/selEnd + hangi uç oynuyor) tutar, hep normalize yazarız.
  * Klavye açıkken oklar yazı alanının üstüne değil, klavyenin hemen üstünde ekran ortasında sabitlenir.
  */
 class CursorAccessibilityService : AccessibilityService() {
@@ -51,6 +57,8 @@ class CursorAccessibilityService : AccessibilityService() {
         private const val CHANNEL_ID = "cursor_status"
         private const val NOTIF_ID = 2001
         private const val TAG = "Imlec"
+        private val COLOR_INPUT = 0xE6202024.toInt()
+        private val COLOR_SELECT = 0xE61A4FA0.toInt()
     }
 
     /** Beklenmeyen hataları sessizce yutma: logcat'e yaz (metin içeriği asla loglanmaz). */
@@ -69,6 +77,24 @@ class CursorAccessibilityService : AccessibilityService() {
     private val lastAnchor = Rect()
     private var anchorAt = 0L
     private var mode = Mode.HIDE
+    private var why = ""
+
+    // Seçim modeli: TextView'ın anchor/odak davranışına güvenmiyoruz, kendimiz tutuyoruz.
+    private var selStart = -1
+    private var selEnd = -1
+    private var selText: String? = null
+    private var selValid = false
+    private var edgeLeft = false      // hangi uç oynuyor: false = sağ uç, true = sol uç
+    private var ownSelAt = 0L         // son kendi seçim hareketimiz (0 = yok); seçimi "bizim" yapar
+    private var longPressAt = 0L
+    private var breakerText: String? = null
+
+    // Overlay parçaları (mod görünümü için)
+    private var overlayBg: GradientDrawable? = null
+    private var edgeBtn: FrameLayout? = null
+    private var edgeIcon: ImageView? = null
+    private var edgeDiv: View? = null
+    private var uiMode: Mode? = null
 
     private val updateRunnable = Runnable {
         try {
@@ -108,11 +134,41 @@ class CursorAccessibilityService : AccessibilityService() {
             ) {
                 remember(src, t == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED)
             }
+            when (t) {
+                AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> noteSelectionEvent(event)
+                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                    selValid = false
+                    ownSelAt = 0L
+                }
+                AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
+                    val cur = target
+                    if (src != null && cur != null && src != cur) {
+                        selValid = false
+                        ownSelAt = 0L
+                    }
+                }
+            }
             src?.recycle()
             schedule()
         } catch (e: Exception) {
             warn(e)
         }
+    }
+
+    /** Seçim olayı: kendi hareketimizin yankısı mı, yoksa kullanıcı mı değiştirdi? */
+    private fun noteSelectionEvent(e: AccessibilityEvent) {
+        val a = e.fromIndex
+        val b = e.toIndex
+        if (a < 0 || b < 0) return
+        if (a != b || ownSelAt != 0L) Diag.log("olay sec $a..$b uzunluk=${e.itemCount}")
+        if (ownSelAt == 0L) return
+        val lo = minOf(a, b)
+        val hi = maxOf(a, b)
+        if (lo == selStart && hi == selEnd) return
+        if (SystemClock.uptimeMillis() - ownSelAt < 400) return // eski hareketin gecikmiş yankısı
+        Diag.log("secim disaridan degisti -> kendi secim kapandi")
+        ownSelAt = 0L
+        selValid = false
     }
 
     override fun onInterrupt() {}
@@ -129,6 +185,8 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private fun teardown() {
         instance = null
+        ownSelAt = 0L
+        selValid = false
         handler.removeCallbacksAndMessages(null)
         hideOverlay()
         lastPick?.recycle()
@@ -163,6 +221,7 @@ class CursorAccessibilityService : AccessibilityService() {
             if (range || textual) {
                 anchorAt = SystemClock.uptimeMillis()
             }
+            if (textual) longPressAt = SystemClock.uptimeMillis()
         } catch (e: Exception) {
             warn(e)
         }
@@ -289,24 +348,30 @@ class CursorAccessibilityService : AccessibilityService() {
     private fun classify(): Mode {
         val input = focusedInput()
         val inputRange = input != null && hasRange(input)
-        val recentSelect = SystemClock.uptimeMillis() - anchorAt < 6000 && !lastAnchor.isEmpty
-        // Menü buluşsal yöntemi yalnızca seçim kanıtı varken çalışır: rastgele küçük bir pencere
-        // (snackbar, başka overlay) seçim menüsü sanılmasın.
-        val menu = if (recentSelect || inputRange) actionModeRect() else null
+        val now = SystemClock.uptimeMillis()
+        val recentSelect = now - anchorAt < 6000 && !lastAnchor.isEmpty
+        // Kendi seçim hareketimiz sürüyorsa: bu seçim bizim, araç çubuğu görünse de görünmese de SELECT.
+        // (Sistem, erişilebilirlik seçim değişiminde araç çubuğunu kapatır; buna bağlı kalınamaz.)
+        val ownSel = ownSelAt != 0L && now - ownSelAt < 60_000
+        val longPressRecent = now - longPressAt < 10_000
+        // Menü buluşsalı yalnızca seçim kanıtı varken çalışır.
+        val menu = if (recentSelect || inputRange || ownSel) actionModeRect() else null
         val pickEditable = try {
             lastPick?.refresh() == true && lastPick?.let { isInputField(it) } == true
         } catch (e: Exception) {
             warn(e)
             false
         }
+        val ime = imeVisible()
 
         val result = when {
+            input != null && inputRange && (ownSel || menu != null || longPressRecent) -> Mode.SELECT
             menu != null && input == null -> Mode.SELECT
-            menu != null && inputRange -> Mode.SELECT
-            input != null && (imeVisible() || input.isFocused) -> Mode.INPUT
+            input != null && (ime || input.isFocused) -> Mode.INPUT
             recentSelect && !pickEditable -> Mode.SELECT
             else -> Mode.HIDE
         }
+        why = "aralik=$inputRange own=$ownSel menu=${menu != null} uzunBasis=$longPressRecent ime=$ime"
         input?.recycle()
         return result
     }
@@ -316,7 +381,16 @@ class CursorAccessibilityService : AccessibilityService() {
             hideOverlay()
             return
         }
-        mode = classify()
+        val newMode = classify()
+        if (newMode != mode) {
+            Diag.log("mod $mode->$newMode ($why)")
+            if (newMode == Mode.SELECT) edgeLeft = false
+        }
+        mode = newMode
+        if (mode != Mode.HIDE) {
+            ensureOverlay()
+            applyModeUi()
+        }
         when (mode) {
             Mode.HIDE -> {
                 if (attached) {
@@ -338,11 +412,16 @@ class CursorAccessibilityService : AccessibilityService() {
             }
             Mode.SELECT -> {
                 handler.removeCallbacks(hideRunnable)
-                lastPick?.let { p ->
-                    try {
-                        if (p.refresh()) swapTarget(p)
-                    } catch (e: Exception) {
-                        warn(e)
+                val fi = focusedInput()
+                if (fi != null && hasRange(fi)) {
+                    swapTarget(fi)
+                } else {
+                    lastPick?.let { p ->
+                        try {
+                            if (p.refresh()) swapTarget(p)
+                        } catch (e: Exception) {
+                            warn(e)
+                        }
                     }
                 }
                 val ime = imeRect()
@@ -471,6 +550,30 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun divider(): View {
+        val d = View(this)
+        d.setBackgroundColor(0x33FFFFFF)
+        return d
+    }
+
+    private fun updateEdgeIcon() {
+        edgeIcon?.setImageResource(if (edgeLeft) R.drawable.ic_edge_left else R.drawable.ic_edge_right)
+    }
+
+    /** INPUT: koyu kapsül, iki ok. SELECT: mavi kapsül + ortada "hangi uç oynuyor" düğmesi. */
+    private fun applyModeUi() {
+        val row = overlay ?: return
+        if (uiMode == mode) return
+        uiMode = mode
+        val sel = mode == Mode.SELECT
+        edgeBtn?.visibility = if (sel) View.VISIBLE else View.GONE
+        edgeDiv?.visibility = if (sel) View.VISIBLE else View.GONE
+        overlayBg?.setColor(if (sel) COLOR_SELECT else COLOR_INPUT)
+        updateEdgeIcon()
+        val unspec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        row.measure(unspec, unspec)
+    }
+
     private fun buildOverlay(sizeDp: Int) {
         hideOverlay()
         val h = dp(sizeDp)
@@ -478,19 +581,42 @@ class CursorAccessibilityService : AccessibilityService() {
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
         val bg = GradientDrawable()
-        bg.setColor(0xE6202024.toInt())
+        bg.setColor(COLOR_INPUT)
         bg.cornerRadius = h / 2f
         bg.setStroke(dp(1), 0x40FFFFFF)
         row.background = bg
+        overlayBg = bg
         row.addView(arrowButton(R.drawable.ic_arrow_left, -1, h), LinearLayout.LayoutParams(h + dp(12), h))
-        val divider = View(this)
-        divider.setBackgroundColor(0x33FFFFFF)
-        row.addView(divider, LinearLayout.LayoutParams(dp(1), (h * 0.5f).toInt()))
+        row.addView(divider(), LinearLayout.LayoutParams(dp(1), (h * 0.5f).toInt()))
+
+        // Yalnızca SELECT'te görünür: hangi uç (sol/sağ) oynasın.
+        val edge = FrameLayout(this)
+        val ei = ImageView(this)
+        ei.setColorFilter(Color.WHITE)
+        val es = (h * 0.5f).toInt()
+        edge.addView(ei, FrameLayout.LayoutParams(es, es, Gravity.CENTER))
+        edge.contentDescription = "Hareket eden uç"
+        edge.setOnClickListener {
+            edgeLeft = !edgeLeft
+            updateEdgeIcon()
+            Diag.log("uc=" + (if (edgeLeft) "sol" else "sag"))
+        }
+        edge.visibility = View.GONE
+        row.addView(edge, LinearLayout.LayoutParams(h, h))
+        val div2 = divider()
+        div2.visibility = View.GONE
+        row.addView(div2, LinearLayout.LayoutParams(dp(1), (h * 0.5f).toInt()))
         row.addView(arrowButton(R.drawable.ic_arrow_right, 1, h), LinearLayout.LayoutParams(h + dp(12), h))
+        edgeBtn = edge
+        edgeIcon = ei
+        edgeDiv = div2
+        updateEdgeIcon()
+
         val unspec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         row.measure(unspec, unspec)
         overlay = row
         builtSizeDp = sizeDp
+        uiMode = null
         val lp = WindowManager.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -574,7 +700,11 @@ class CursorAccessibilityService : AccessibilityService() {
         val p = pos.coerceIn(0, len)
         try {
             val bi = breaker
-            bi.setText(text.toString())
+            val str = if (text is String) text else text.toString()
+            if (breakerText !== str) {
+                bi.setText(str)
+                breakerText = str
+            }
             val r = if (dir > 0) bi.following(p) else bi.preceding(p)
             if (r != android.icu.text.BreakIterator.DONE) return r.coerceIn(0, len)
             return if (dir > 0) len else 0
@@ -672,7 +802,7 @@ class CursorAccessibilityService : AccessibilityService() {
         try {
             when (mode) {
                 Mode.INPUT -> moveInput(dir, repeat)
-                Mode.SELECT -> moveSelect(dir)
+                Mode.SELECT -> moveSelect(dir, repeat)
                 Mode.HIDE -> {}
             }
         } catch (e: Exception) {
@@ -682,11 +812,13 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private fun moveInput(dir: Int, repeat: Boolean) {
         val node = target ?: focusedInput() ?: return
+        if (!repeat) Diag.log("imlec dir=$dir")
         if (!repeat && refreshOk(node) && hasRange(node)) {
             // İlk basış: aralık seçiliyse ok tuşu gibi daralt (sola = başa, sağa = sona).
             val lo = minOf(node.textSelectionStart, node.textSelectionEnd)
             val hi = maxOf(node.textSelectionStart, node.textSelectionEnd)
             val p = if (dir < 0) lo else hi
+            Diag.log("imlec: aralik daraltildi $lo..$hi -> $p")
             setSel(node, p, p)
             return
         }
@@ -712,25 +844,82 @@ class CursorAccessibilityService : AccessibilityService() {
         setSel(live, p, p)
     }
 
-    private fun moveSelect(dir: Int) {
-        val node = target?.also { refreshOk(it) } ?: lastPick
-        if (node != null) {
-            // 1) Sistemin seçim uzatması: anchor korunur, yalnızca odak ucu oynar.
-            if (moveByGranularity(node, dir, true)) return
+    /** Seçim modelini düğümden yükler (yalnızca yeni basışta). Şifre/ipucu/boş metinde yüklemez. */
+    private fun loadSelModel(node: AccessibilityNodeInfo): Boolean {
+        selValid = false
+        if (!refreshOk(node)) return false
+        if (node.isPassword || node.isShowingHintText) return false
+        val text = node.text?.toString() ?: return false
+        if (text.isEmpty()) return false
+        var s0 = node.textSelectionStart
+        var e0 = node.textSelectionEnd
+        if (s0 < 0 || e0 < 0) return false
+        if (s0 > e0) {
+            val t = s0; s0 = e0; e0 = t
+        }
+        if (s0 == e0 || e0 > text.length) return false
+        selText = text
+        selStart = s0
+        selEnd = e0
+        selValid = true
+        return true
+    }
 
-            // 2) Yedek: anchor = textSelectionStart, odak = textSelectionEnd. Swap YOK, anchor sabit kalır.
-            if (isInputField(node) && !node.isPassword) {
-                val text: CharSequence = if (node.isShowingHintText) "" else (node.text ?: "")
-                val anchor = node.textSelectionStart
-                val focus = node.textSelectionEnd
-                if (anchor >= 0 && focus >= 0 && text.isNotEmpty()) {
-                    val nf = step(text, focus, dir).coerceIn(0, text.length)
-                    if (nf != focus && setSel(node, anchor, nf)) return
-                }
+    /**
+     * Seçimi kendi modelimizle taşır: aktif uç (sol/sağ) dir yönünde bir grapheme oynar, diğer uç sabit.
+     * Uçlar birbirini geçmez (en az bir karakter seçili kalır), yani seçim kendiliğinden çökmez.
+     * Yazım hep normalize (start < end): TextView ters aralığı reddeder.
+     */
+    private fun moveSelect(dir: Int, repeat: Boolean) {
+        val node = target ?: lastPick ?: return
+        if (!repeat || !selValid) {
+            if (!loadSelModel(node)) {
+                Diag.log("sec: model yuklenemedi -> yedek")
+                moveSelectFallback(node, dir)
+                return
             }
         }
-        // 3) Son çare (web seçimi): yalnızca yakın zamanda gerçek seçim sinyali varsa.
+        val text = selText ?: return
+        var ns = selStart
+        var ne = selEnd
+        if (edgeLeft) {
+            ns = step(text, selStart, dir)
+            val maxStart = step(text, selEnd, -1)
+            if (ns > maxStart) ns = maxStart
+            if (ns < 0) ns = 0
+        } else {
+            ne = step(text, selEnd, dir)
+            val minEnd = step(text, selStart, 1)
+            if (ne < minEnd) ne = minEnd
+            if (ne > text.length) ne = text.length
+        }
+        if (ns == selStart && ne == selEnd) {
+            if (!repeat) Diag.log("sec: sinirda dir=$dir uc=${if (edgeLeft) "sol" else "sag"} $selStart..$selEnd")
+            return
+        }
+        val ok = setSel(node, ns, ne)
+        Diag.log("sec dir=$dir uc=${if (edgeLeft) "sol" else "sag"} rep=$repeat $selStart..$selEnd -> $ns..$ne ok=$ok uzunluk=${text.length}")
+        if (ok) {
+            selStart = ns
+            selEnd = ne
+            ownSelAt = SystemClock.uptimeMillis()
+        } else {
+            selValid = false
+        }
+    }
+
+    /**
+     * Metni okunamayan düğümler (ör. web): sistem uzatması, olmazsa korumalı sürükleme.
+     * TextView için kullanılmaz (granülerlik seçimi çökertir), bu yol yalnızca model kurulamadığında.
+     */
+    private fun moveSelectFallback(node: AccessibilityNodeInfo, dir: Int) {
+        if (node.isPassword) return
+        if (moveByGranularity(node, dir, true)) {
+            Diag.log("sec yedek: granulerlik ok")
+            return
+        }
         if (SystemClock.uptimeMillis() - anchorAt < 6000) {
+            Diag.log("sec yedek: surukleme")
             handler.post { dragHandle(dir) }
         }
     }

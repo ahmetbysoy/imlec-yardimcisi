@@ -46,9 +46,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlin.math.roundToInt
@@ -209,10 +213,34 @@ fun MainScreen() {
             minLines = 3
         )
         Text(
-            "◀ bir karakter sola, ▶ bir karakter sağa. Basılı tutarsan hızlanır.",
+            "◀ bir karakter sola, ▶ bir karakter sağa. Basılı tutarsan hızlanır. Metin seçiliyken oklar mavi olur, ortadaki düğme hangi ucun (sol/sağ) oynayacağını seçer.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+
+        Text(
+            "Tanılama (sorun olursa kopyalayıp gönder; yalnızca mod ve sayılar, yazdığın metin yok)",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        var diag by remember { mutableStateOf(Diag.dump()) }
+        val clip = LocalClipboardManager.current
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { diag = Diag.dump() }) { Text("Yenile") }
+            TextButton(onClick = { clip.setText(AnnotatedString(Diag.dump())) }) { Text("Kopyala") }
+            TextButton(onClick = {
+                Diag.clear()
+                diag = ""
+            }) { Text("Temizle") }
+        }
+        Card(Modifier.fillMaxWidth()) {
+            Text(
+                if (diag.isEmpty()) "(boş)" else diag,
+                modifier = Modifier.padding(8.dp),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp
+            )
+        }
     }
 
     if (!a11yOk && !dismissed) {
